@@ -1,5 +1,6 @@
 import os
 import requests
+import urllib.request
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify
 
@@ -10,7 +11,7 @@ NAMECOM_API_TOKEN = os.environ["NAMECOM_API_TOKEN"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 
 # ── name.com API ─────────────────────────────────────────────────────────────
-def get_all_domains():
+def get_namecom_domains():
     domains = []
     page = 1
     while True:
@@ -42,7 +43,7 @@ def send_message(chat_id, message):
 def check_domains(chat_id, limit=5):
     send_message(chat_id, "🔍 กำลังตรวจสอบโดเมน...")
     try:
-        domains = get_all_domains()
+        domains = get_namecom_domains()
     except Exception as e:
         send_message(chat_id, f"❌ เชื่อมต่อ name.com ไม่ได้: {e}")
         return
@@ -61,7 +62,7 @@ def check_domains(chat_id, limit=5):
         except ValueError:
             continue
         days_left = (expire_dt - now).days
-        domain_list.append((days_left, name, expire_dt, auto_renew))
+        domain_list.append((days_left, name, expire_dt, auto_renew, "name.com"))
 
     domain_list.sort(key=lambda x: x[0])
 
@@ -77,7 +78,7 @@ def check_domains(chat_id, limit=5):
         f"{'─' * 30}\n"
     ]
 
-    for days_left, name, expire_dt, auto_renew in top:
+    for days_left, name, expire_dt, auto_renew, source in top:
         if days_left <= 0:
             status = "🔴 <b>หมดอายุแล้ว!</b>"
         elif days_left <= 7:
@@ -93,7 +94,7 @@ def check_domains(chat_id, limit=5):
         expire_date = expire_dt.strftime("%d %b %Y")
 
         lines.append(
-            f"🌐 <b>{name}</b>\n"
+            f"🌐 <b>{name}</b> <i>({source})</i>\n"
             f"   {status}\n"
             f"   📅 หมดอายุ: {expire_date}\n"
             f"   {renew_note}"
@@ -104,7 +105,6 @@ def check_domains(chat_id, limit=5):
 # ── Webhook ───────────────────────────────────────────────────────────────────
 @app.route("/webhook/<token>", methods=["POST"])
 def webhook(token):
-
     data = request.json
     message = data.get("message", {})
     chat_id = message.get("chat", {}).get("id")
@@ -131,6 +131,11 @@ def webhook(token):
 @app.route("/", methods=["GET"])
 def index():
     return "Domain Alert Bot is running! 🚀"
+
+@app.route("/ip", methods=["GET"])
+def get_ip():
+    ip = urllib.request.urlopen("https://api.ipify.org").read().decode()
+    return ip
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
