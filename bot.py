@@ -41,7 +41,6 @@ def send_message(chat_id, message):
 # ── Domain Check ─────────────────────────────────────────────────────────────
 def check_domains(chat_id, limit=5):
     send_message(chat_id, "🔍 กำลังตรวจสอบโดเมน...")
-
     try:
         domains = get_all_domains()
     except Exception as e:
@@ -64,14 +63,12 @@ def check_domains(chat_id, limit=5):
         days_left = (expire_dt - now).days
         domain_list.append((days_left, name, expire_dt, auto_renew))
 
-    # เรียงจากใกล้หมดอายุที่สุด
     domain_list.sort(key=lambda x: x[0])
 
     if not domain_list:
         send_message(chat_id, "ℹ️ ไม่พบโดเมนในบัญชีของคุณ")
         return
 
-    # แสดง top N ที่ใกล้หมดอายุที่สุด
     top = domain_list[:limit]
     now_str = now.strftime("%d %b %Y %H:%M")
     lines = [
@@ -105,8 +102,11 @@ def check_domains(chat_id, limit=5):
     send_message(chat_id, "\n\n".join(lines))
 
 # ── Webhook ───────────────────────────────────────────────────────────────────
-@app.route(f"/webhook/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
-def webhook():
+@app.route("/webhook/<token>", methods=["POST"])
+def webhook(token):
+    if token != TELEGRAM_BOT_TOKEN:
+        return jsonify(ok=False), 403
+
     data = request.json
     message = data.get("message", {})
     chat_id = message.get("chat", {}).get("id")
@@ -115,9 +115,11 @@ def webhook():
     if not chat_id:
         return jsonify(ok=True)
 
-    if text in ["/check", "/check@mydomainalert2_bot"]:
+    if "/check10" in text:
+        check_domains(chat_id, limit=10)
+    elif "/check" in text:
         check_domains(chat_id)
-    elif text in ["/start", "/help"]:
+    elif "/start" in text or "/help" in text:
         send_message(chat_id,
             "👋 <b>Domain Alert Bot</b>\n\n"
             "คำสั่งที่ใช้ได้:\n"
@@ -125,8 +127,6 @@ def webhook():
             "📋 /check10 — ดู 10 อันดับ\n"
             "ℹ️ /help — แสดงคำสั่งทั้งหมด"
         )
-    elif text in ["/check10", "/check10@mydomainalert2_bot"]:
-        check_domains(chat_id, limit=10)
 
     return jsonify(ok=True)
 
