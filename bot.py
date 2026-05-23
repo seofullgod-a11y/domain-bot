@@ -1,6 +1,7 @@
 import os
 import requests
 import urllib.request
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify
 
@@ -9,8 +10,10 @@ app = Flask(__name__)
 NAMECOM_USERNAME = os.environ["NAMECOM_USERNAME"]
 NAMECOM_API_TOKEN = os.environ["NAMECOM_API_TOKEN"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+NAMECHEAP_USERNAME = os.environ.get("NAMECHEAP_USERNAME", "")
+NAMECHEAP_API_KEY = os.environ.get("NAMECHEAP_API_KEY", "")
 
-# ── name.com API ─────────────────────────────────────────────────────────────
+# ── name.com API ──────────────────────────────────────────────────────────────
 def get_namecom_domains():
     domains = []
     page = 1
@@ -24,13 +27,68 @@ def get_namecom_domains():
         resp.raise_for_status()
         data = resp.json()
         batch = data.get("domains", [])
-        domains.extend(batch)
+        for d in batch:
+            expire_str = d.get("expireDate", "")
+            if not expire_str:
+                continue
+            try:
+                expire_dt = datetime.fromisoformat(expire_str.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            domains.append({
+                "name": d.get("domainName", ""),
+                "expire_dt": expire_dt,
+                "auto_renew": d.get("autorenewEnabled", False),
+                "source": "name.com",
+            })
         if len(batch) < 1000:
             break
         page += 1
     return domains
 
-# ── Telegram ─────────────────────────────────────────────────────────────────
+# ── Namecheap API ─────────────────────────────────────────────────────────────
+def get_namecheap_domains():
+    if not NAMECHEAP_USERNAME or not NAMECHEAP_API_KEY:
+        return []
+    try:
+        client_ip = urllib.request.urlopen("https://api.ipify.org", timeout=10).read().decode()
+        resp = requests.get(
+            "https://api.namecheap.com/xml.response",
+            params={
+                "ApiUser": NAMECHEAP_USERNAME,
+                "ApiKey": NAMECHEAP_API_KEY,
+                "UserName": NAMECHEAP_USERNAME,
+                "Command": "namecheap.domains.getList",
+                "ClientIp": client_ip,
+                "PageSize": 100,
+            },
+            timeout=30,
+        )
+        root = ET.fromstring(resp.text)
+        ns = {"nc": "http://api.namecheap.com/xml.response"}
+        domains = []
+        for d in root.findall(".//nc:Domain", ns):
+            name = d.get("Name", "")
+            expires = d.get("Expires", "")
+            auto_renew = d.get("AutoRenew", "false").lower() == "true"
+            if not expires:
+                continue
+            try:
+                expire_dt = datetime.strptime(expires, "%m/%d/%Y").replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            domains.append({
+                "name": name,
+                "expire_dt": expire_dt,
+                "auto_renew": auto_renew,
+                "source": "Namecheap",
+            })
+        return domains
+    except Exception as e:
+        print(f"Namecheap error: {e}")
+        return []
+
+# ── Telegram ──────────────────────────────────────────────────────────────────
 def send_message(chat_id, message):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     requests.post(url, json={
@@ -39,46 +97,40 @@ def send_message(chat_id, message):
         "parse_mode": "HTML",
     }, timeout=15)
 
-# ── Domain Check ─────────────────────────────────────────────────────────────
+# ── Domain Check ──────────────────────────────────────────────────────────────
 def check_domains(chat_id, limit=5):
-    send_message(chat_id, "🔍 กำลังตรวจสอบโดเมน...")
+    send_message(chat_id, "🔍 กำลังตรวจสอบโดเมนทั้งหมด...")
+
+    all_domains = []
+
     try:
-        domains = get_namecom_domains()
+        all_domains += get_namecom_domains()
     except Exception as e:
-        send_message(chat_id, f"❌ เชื่อมต่อ name.com ไม่ได้: {e}")
-        return
+        send_message(chat_id, f"⚠️ name.com: {e}")
 
-    now = datetime.now(timezone.utc)
-    domain_list = []
+    all_domains += get_namecheap_domains()
 
-    for domain in domains:
-        name = domain.get("domainName", "")
-        expire_str = domain.get("expireDate", "")
-        auto_renew = domain.get("autorenewEnabled", False)
-        if not expire_str:
-            continue
-        try:
-            expire_dt = datetime.fromisoformat(expire_str.replace("Z", "+00:00"))
-        except ValueError:
-            continue
-        days_left = (expire_dt - now).days
-        domain_list.append((days_left, name, expire_dt, auto_renew, "name.com"))
-
-    domain_list.sort(key=lambda x: x[0])
-
-    if not domain_list:
+    if not all_domains:
         send_message(chat_id, "ℹ️ ไม่พบโดเมนในบัญชีของคุณ")
         return
 
-    top = domain_list[:limit]
+    now = datetime.now(timezone.utc)
+    for d in all_domains:
+        d["days_left"] = (d["expire_dt"] - now).days
+
+    all_domains.sort(key=lambda x: x["days_left"])
+    top = all_domains[:limit]
+
     now_str = now.strftime("%d %b %Y %H:%M")
     lines = [
         f"📋 <b>โดเมนใกล้หมดอายุที่สุด {limit} อันดับ</b>\n"
         f"🕐 ตรวจสอบเมื่อ: {now_str} UTC\n"
+        f"📊 รวมทั้งหมด {len(all_domains)} โดเมน\n"
         f"{'─' * 30}\n"
     ]
 
-    for days_left, name, expire_dt, auto_renew, source in top:
+    for d in top:
+        days_left = d["days_left"]
         if days_left <= 0:
             status = "🔴 <b>หมดอายุแล้ว!</b>"
         elif days_left <= 7:
@@ -90,11 +142,11 @@ def check_domains(chat_id, limit=5):
         else:
             status = f"🟢 เหลือ {days_left} วัน"
 
-        renew_note = "✅ Auto-renew เปิด" if auto_renew else "❌ Auto-renew ปิด"
-        expire_date = expire_dt.strftime("%d %b %Y")
+        renew_note = "✅ Auto-renew เปิด" if d["auto_renew"] else "❌ Auto-renew ปิด"
+        expire_date = d["expire_dt"].strftime("%d %b %Y")
 
         lines.append(
-            f"🌐 <b>{name}</b> <i>({source})</i>\n"
+            f"🌐 <b>{d['name']}</b> <i>({d['source']})</i>\n"
             f"   {status}\n"
             f"   📅 หมดอายุ: {expire_date}\n"
             f"   {renew_note}"
