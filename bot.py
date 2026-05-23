@@ -15,8 +15,9 @@ NAMECHEAP_ACCOUNTS = {}
 for i in range(1, 4):
     u = os.environ.get(f"NAMECHEAP_USERNAME_{i}", "")
     k = os.environ.get(f"NAMECHEAP_API_KEY_{i}", "")
+    l = os.environ.get(f"NAMECHEAP_LABEL_{i}", f"ไอดีที่ {i}")
     if u and k:
-        NAMECHEAP_ACCOUNTS[i] = {"username": u, "api_key": k}
+        NAMECHEAP_ACCOUNTS[i] = {"username": u, "api_key": k, "label": l}
 
 # ── name.com API ──────────────────────────────────────────────────────────────
 def get_namecom_domains():
@@ -73,12 +74,11 @@ def get_namecheap_domains(account_num):
         root = ET.fromstring(resp.text)
         ns = {"nc": "http://api.namecheap.com/xml.response"}
 
-        # เช็ค error
         status = root.get("Status", "")
         if status == "ERROR":
             errors = root.findall(".//nc:Error", ns)
             msg = errors[0].text if errors else "Unknown error"
-            return [], f"❌ Namecheap ไอดีที่ {account_num}: {msg}"
+            return [], f"❌ Namecheap [{acc['label']}]: {msg}"
 
         domains = []
         for d in root.findall(".//nc:Domain", ns):
@@ -95,11 +95,11 @@ def get_namecheap_domains(account_num):
                 "name": name,
                 "expire_dt": expire_dt,
                 "auto_renew": auto_renew,
-                "source": f"Namecheap #{account_num}",
+                "source": f"Namecheap [{acc['label']}]",
             })
         return domains, None
     except Exception as e:
-        return [], f"❌ Namecheap ไอดีที่ {account_num}: {e}"
+        return [], f"❌ Namecheap [{acc['label']}]: {e}"
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
 def send_message(chat_id, message):
@@ -148,7 +148,7 @@ def send_domain_list(chat_id, domains, title, limit=5):
         expire_date = d["expire_dt"].strftime("%d %b %Y")
 
         lines.append(
-            f"🌐 <b>{d['name']}</b>\n"
+            f"🌐 <b>{d['name']}</b> <i>({d['source']})</i>\n"
             f"   {status}\n"
             f"   📅 หมดอายุ: {expire_date}\n"
             f"   {renew_note}"
@@ -168,28 +168,34 @@ def webhook(token):
         return jsonify(ok=True)
 
     if "/checknc1" in text:
-        send_message(chat_id, "🔍 กำลังตรวจสอบ Namecheap ไอดีที่ 1...")
+        acc = NAMECHEAP_ACCOUNTS.get(1, {})
+        label = acc.get("label", "ไอดีที่ 1")
+        send_message(chat_id, f"🔍 กำลังตรวจสอบ Namecheap [{label}]...")
         domains, err = get_namecheap_domains(1)
         if err:
             send_message(chat_id, err)
         else:
-            send_domain_list(chat_id, domains, "Namecheap ไอดีที่ 1")
+            send_domain_list(chat_id, domains, f"Namecheap ไอดีที่ 1 [{label}]")
 
     elif "/checknc2" in text:
-        send_message(chat_id, "🔍 กำลังตรวจสอบ Namecheap ไอดีที่ 2...")
+        acc = NAMECHEAP_ACCOUNTS.get(2, {})
+        label = acc.get("label", "ไอดีที่ 2")
+        send_message(chat_id, f"🔍 กำลังตรวจสอบ Namecheap [{label}]...")
         domains, err = get_namecheap_domains(2)
         if err:
             send_message(chat_id, err)
         else:
-            send_domain_list(chat_id, domains, "Namecheap ไอดีที่ 2")
+            send_domain_list(chat_id, domains, f"Namecheap ไอดีที่ 2 [{label}]")
 
     elif "/checknc3" in text:
-        send_message(chat_id, "🔍 กำลังตรวจสอบ Namecheap ไอดีที่ 3...")
+        acc = NAMECHEAP_ACCOUNTS.get(3, {})
+        label = acc.get("label", "ไอดีที่ 3")
+        send_message(chat_id, f"🔍 กำลังตรวจสอบ Namecheap [{label}]...")
         domains, err = get_namecheap_domains(3)
         if err:
             send_message(chat_id, err)
         else:
-            send_domain_list(chat_id, domains, "Namecheap ไอดีที่ 3")
+            send_domain_list(chat_id, domains, f"Namecheap ไอดีที่ 3 [{label}]")
 
     elif "/check10" in text:
         send_message(chat_id, "🔍 กำลังตรวจสอบโดเมนทั้งหมด...")
@@ -223,8 +229,8 @@ def webhook(token):
 
     elif "/start" in text or "/help" in text:
         nc_cmds = ""
-        for i in NAMECHEAP_ACCOUNTS:
-            nc_cmds += f"🔍 /checknc{i} — เช็ค Namecheap ไอดีที่ {i}\n"
+        for i, acc in NAMECHEAP_ACCOUNTS.items():
+            nc_cmds += f"🔍 /checknc{i} — เช็ค Namecheap [{acc['label']}]\n"
         send_message(chat_id,
             "👋 <b>Domain Alert Bot</b>\n\n"
             "คำสั่งที่ใช้ได้:\n"
