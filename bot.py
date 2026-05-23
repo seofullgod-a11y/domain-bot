@@ -10,8 +10,13 @@ app = Flask(__name__)
 NAMECOM_USERNAME = os.environ["NAMECOM_USERNAME"]
 NAMECOM_API_TOKEN = os.environ["NAMECOM_API_TOKEN"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-NAMECHEAP_USERNAME = os.environ.get("NAMECHEAP_USERNAME", "")
-NAMECHEAP_API_KEY = os.environ.get("NAMECHEAP_API_KEY", "")
+
+NAMECHEAP_ACCOUNTS = {}
+for i in range(1, 4):
+    u = os.environ.get(f"NAMECHEAP_USERNAME_{i}", "")
+    k = os.environ.get(f"NAMECHEAP_API_KEY_{i}", "")
+    if u and k:
+        NAMECHEAP_ACCOUNTS[i] = {"username": u, "api_key": k}
 
 # ── name.com API ──────────────────────────────────────────────────────────────
 def get_namecom_domains():
@@ -47,17 +52,18 @@ def get_namecom_domains():
     return domains
 
 # ── Namecheap API ─────────────────────────────────────────────────────────────
-def get_namecheap_domains():
-    if not NAMECHEAP_USERNAME or not NAMECHEAP_API_KEY:
-        return []
+def get_namecheap_domains(account_num):
+    acc = NAMECHEAP_ACCOUNTS.get(account_num)
+    if not acc:
+        return [], f"❌ ไม่พบข้อมูล Namecheap ไอดีที่ {account_num}"
     try:
         client_ip = urllib.request.urlopen("https://api.ipify.org", timeout=10).read().decode()
         resp = requests.get(
             "https://api.namecheap.com/xml.response",
             params={
-                "ApiUser": NAMECHEAP_USERNAME,
-                "ApiKey": NAMECHEAP_API_KEY,
-                "UserName": NAMECHEAP_USERNAME,
+                "ApiUser": acc["username"],
+                "ApiKey": acc["api_key"],
+                "UserName": acc["username"],
                 "Command": "namecheap.domains.getList",
                 "ClientIp": client_ip,
                 "PageSize": 100,
@@ -66,6 +72,14 @@ def get_namecheap_domains():
         )
         root = ET.fromstring(resp.text)
         ns = {"nc": "http://api.namecheap.com/xml.response"}
+
+        # เช็ค error
+        status = root.get("Status", "")
+        if status == "ERROR":
+            errors = root.findall(".//nc:Error", ns)
+            msg = errors[0].text if errors else "Unknown error"
+            return [], f"❌ Namecheap ไอดีที่ {account_num}: {msg}"
+
         domains = []
         for d in root.findall(".//nc:Domain", ns):
             name = d.get("Name", "")
@@ -81,12 +95,11 @@ def get_namecheap_domains():
                 "name": name,
                 "expire_dt": expire_dt,
                 "auto_renew": auto_renew,
-                "source": "Namecheap",
+                "source": f"Namecheap #{account_num}",
             })
-        return domains
+        return domains, None
     except Exception as e:
-        print(f"Namecheap error: {e}")
-        return []
+        return [], f"❌ Namecheap ไอดีที่ {account_num}: {e}"
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
 def send_message(chat_id, message):
@@ -97,35 +110,24 @@ def send_message(chat_id, message):
         "parse_mode": "HTML",
     }, timeout=15)
 
-# ── Domain Check ──────────────────────────────────────────────────────────────
-def check_domains(chat_id, limit=5):
-    send_message(chat_id, "🔍 กำลังตรวจสอบโดเมนทั้งหมด...")
-
-    all_domains = []
-
-    try:
-        all_domains += get_namecom_domains()
-    except Exception as e:
-        send_message(chat_id, f"⚠️ name.com: {e}")
-
-    all_domains += get_namecheap_domains()
-
-    if not all_domains:
-        send_message(chat_id, "ℹ️ ไม่พบโดเมนในบัญชีของคุณ")
+# ── Format & Send Domain List ─────────────────────────────────────────────────
+def send_domain_list(chat_id, domains, title, limit=5):
+    if not domains:
+        send_message(chat_id, "ℹ️ ไม่พบโดเมนในบัญชีนี้")
         return
 
     now = datetime.now(timezone.utc)
-    for d in all_domains:
+    for d in domains:
         d["days_left"] = (d["expire_dt"] - now).days
 
-    all_domains.sort(key=lambda x: x["days_left"])
-    top = all_domains[:limit]
+    domains.sort(key=lambda x: x["days_left"])
+    top = domains[:limit]
 
     now_str = now.strftime("%d %b %Y %H:%M")
     lines = [
-        f"📋 <b>โดเมนใกล้หมดอายุที่สุด {limit} อันดับ</b>\n"
+        f"📋 <b>{title}</b>\n"
         f"🕐 ตรวจสอบเมื่อ: {now_str} UTC\n"
-        f"📊 รวมทั้งหมด {len(all_domains)} โดเมน\n"
+        f"📊 รวมทั้งหมด {len(domains)} โดเมน\n"
         f"{'─' * 30}\n"
     ]
 
@@ -146,7 +148,7 @@ def check_domains(chat_id, limit=5):
         expire_date = d["expire_dt"].strftime("%d %b %Y")
 
         lines.append(
-            f"🌐 <b>{d['name']}</b> <i>({d['source']})</i>\n"
+            f"🌐 <b>{d['name']}</b>\n"
             f"   {status}\n"
             f"   📅 หมดอายุ: {expire_date}\n"
             f"   {renew_note}"
@@ -165,16 +167,70 @@ def webhook(token):
     if not chat_id:
         return jsonify(ok=True)
 
-    if "/check10" in text:
-        check_domains(chat_id, limit=10)
+    if "/checknc1" in text:
+        send_message(chat_id, "🔍 กำลังตรวจสอบ Namecheap ไอดีที่ 1...")
+        domains, err = get_namecheap_domains(1)
+        if err:
+            send_message(chat_id, err)
+        else:
+            send_domain_list(chat_id, domains, "Namecheap ไอดีที่ 1")
+
+    elif "/checknc2" in text:
+        send_message(chat_id, "🔍 กำลังตรวจสอบ Namecheap ไอดีที่ 2...")
+        domains, err = get_namecheap_domains(2)
+        if err:
+            send_message(chat_id, err)
+        else:
+            send_domain_list(chat_id, domains, "Namecheap ไอดีที่ 2")
+
+    elif "/checknc3" in text:
+        send_message(chat_id, "🔍 กำลังตรวจสอบ Namecheap ไอดีที่ 3...")
+        domains, err = get_namecheap_domains(3)
+        if err:
+            send_message(chat_id, err)
+        else:
+            send_domain_list(chat_id, domains, "Namecheap ไอดีที่ 3")
+
+    elif "/check10" in text:
+        send_message(chat_id, "🔍 กำลังตรวจสอบโดเมนทั้งหมด...")
+        all_domains = []
+        try:
+            all_domains += get_namecom_domains()
+        except Exception as e:
+            send_message(chat_id, f"⚠️ name.com: {e}")
+        for i in NAMECHEAP_ACCOUNTS:
+            d, err = get_namecheap_domains(i)
+            if err:
+                send_message(chat_id, err)
+            else:
+                all_domains += d
+        send_domain_list(chat_id, all_domains, "โดเมนทั้งหมด", limit=10)
+
     elif "/check" in text:
-        check_domains(chat_id)
+        send_message(chat_id, "🔍 กำลังตรวจสอบโดเมนทั้งหมด...")
+        all_domains = []
+        try:
+            all_domains += get_namecom_domains()
+        except Exception as e:
+            send_message(chat_id, f"⚠️ name.com: {e}")
+        for i in NAMECHEAP_ACCOUNTS:
+            d, err = get_namecheap_domains(i)
+            if err:
+                send_message(chat_id, err)
+            else:
+                all_domains += d
+        send_domain_list(chat_id, all_domains, "โดเมนทั้งหมด")
+
     elif "/start" in text or "/help" in text:
+        nc_cmds = ""
+        for i in NAMECHEAP_ACCOUNTS:
+            nc_cmds += f"🔍 /checknc{i} — เช็ค Namecheap ไอดีที่ {i}\n"
         send_message(chat_id,
             "👋 <b>Domain Alert Bot</b>\n\n"
             "คำสั่งที่ใช้ได้:\n"
-            "🔍 /check — ดูโดเมนใกล้หมดอายุที่สุด 5 อันดับ\n"
-            "📋 /check10 — ดู 10 อันดับ\n"
+            "🔍 /check — ดูโดเมนใกล้หมดอายุที่สุด 5 อันดับ (ทุกไอดี)\n"
+            "📋 /check10 — ดู 10 อันดับ (ทุกไอดี)\n"
+            f"{nc_cmds}"
             "ℹ️ /help — แสดงคำสั่งทั้งหมด"
         )
 
