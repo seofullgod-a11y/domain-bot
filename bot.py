@@ -104,8 +104,6 @@ def check_domains(chat_id, limit=5):
 # ── Webhook ───────────────────────────────────────────────────────────────────
 @app.route("/webhook/<token>", methods=["POST"])
 def webhook(token):
-    if token != TELEGRAM_BOT_TOKEN:
-        return jsonify(ok=False), 403
 
     data = request.json
     message = data.get("message", {})
